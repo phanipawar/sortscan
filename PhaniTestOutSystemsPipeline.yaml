@@ -1,0 +1,540 @@
+# ****************************************************************** 
+
+# Declare parameters 
+
+# ****************************************************************** 
+
+parameters: 
+
+- name: TriggerManifest 
+
+  displayName: Trigger Manifest 
+
+  type: string 
+
+- name: TriggeredBy 
+
+  displayName: Triggered By 
+
+  type: string 
+
+ 
+
+# ****************************************************************** 
+
+# Declare variables 
+
+# ****************************************************************** 
+
+variables: 
+
+  - group: OutSystems_Variable_Group 
+
+ 
+
+# ****************************************************************** 
+
+# Declare triggers 
+
+# ****************************************************************** 
+
+trigger: none 
+
+pr: none 
+
+ 
+
+# ****************************************************************** 
+
+# Declare stages 
+
+# ****************************************************************** 
+
+stages: 
+
+ 
+
+# ****************************************************************** 
+
+# Stage 1: Setup 
+
+# ****************************************************************** 
+
+- stage: setup 
+
+  displayName: Setup 
+
+  jobs: 
+
+    - job: publish_trigger_manifest 
+
+      displayName: Publish Trigger Manifest 
+
+      steps: 
+
+      - checkout: none # Avoid repository checkout 
+
+      - task: PowerShell@2 
+
+        inputs: 
+
+          targetType: inline 
+
+          script: | 
+
+            mkdir $(ArtifactsBuildFolder) 
+
+            ('${{ parameters.TriggerManifest }}') | Out-File -FilePath "$(ArtifactsBuildFolder)\$(ArtifactName)" -Encoding default 
+
+          workingDirectory: $(System.DefaultWorkingDirectory) 
+
+        displayName: 'Create trigger manifest file'   
+
+ 
+
+      - task: PublishBuildArtifacts@1 
+
+        inputs: 
+
+           PathtoPublish: $(ArtifactsBuildFolder) 
+
+           ArtifactName: $(ArtifactsBuildFolder) 
+
+        condition: succeeded() 
+
+        displayName: 'Publish trigger manifest artifact' 
+
+ 
+ 
+
+# ****************************************************************** 
+
+# Stage 2: Code Quality 
+
+# ****************************************************************** 
+
+- stage: code_analysis 
+
+  displayName: Code Quality     
+
+  jobs: 
+
+ 
+
+  # ****************************************************************** 
+
+  # Job2.1: Fetch Technical Debt 
+
+  # ****************************************************************** 
+
+  # Fetch technical debt data from AI Mentor Studio 
+
+  # ****************************************************************** 
+
+ 
+
+    - job: fetch_tech_debt 
+
+      displayName: Fetch Technical Debt  
+
+      steps: 
+
+        - checkout: none # Avoid repository checkout 
+
+        - download: current # Download current pipeline artifacts     
+
+        - script: | 
+
+            pip install -U outsystems-pipeline==$(OSPackageVersion) 
+
+          displayName: 'Install outsystems-pipeline package' 
+
+ 
+
+        - script: > 
+
+            python -m outsystems.pipeline.fetch_tech_debt 
+
+            --artifacts "$(ArtifactsBuildFolder)"  
+
+            --ad_hostname $(AIMENTORSTUDIOHOSTNAME)  
+
+            --activation_code $(ACTIVATIONCODE)  
+
+            --api_key $(APIKEY) 
+
+            --manifest_file "$(Pipeline.Workspace)/$(ArtifactsBuildFolder)/$(ArtifactName)" 
+
+          displayName: 'Fetch technical debt data from AI Mentor Studio' 
+
+ 
+
+        - task: PublishBuildArtifacts@1 
+
+          inputs: 
+
+            PathtoPublish: "$(ArtifactsBuildFolder)" 
+
+            ArtifactName: $(AIMentorStudioFolder) 
+
+          condition: succeeded() 
+
+          displayName: 'Publish technical debt artifact' 
+
+ 
+
+# ****************************************************************** 
+
+# Job2.2: Validate Technical Debt   
+
+# ****************************************************************** 
+
+# Validate technical debt data for provided application scope using  
+
+# predefined thresholds 
+
+# ****************************************************************** 
+
+    - job: validate_tech_debt 
+
+      displayName: Validate Technical Debt  
+
+      dependsOn: fetch_tech_debt 
+
+      steps: 
+
+        - download: current # Download current pipeline artifacts 
+
+   
+
+  # ****************************************************************** 
+
+  # Step: Check technical debt data thresholds 
+
+  # ****************************************************************** 
+
+  # Check technical debt data thresholds for application list 
+
+  # ******************************************************************  
+
+        - task: PythonScript@0 
+
+          inputs: 
+
+            scriptSource: 'filePath' 
+
+            scriptPath: './scripts/tech_debt_validation.py' 
+
+            arguments: > 
+
+              --manifest_file "$(Pipeline.Workspace)/$(ArtifactsBuildFolder)/$(ArtifactName)" 
+
+              --techdebt_data "$(Pipeline.Workspace)/$(AIMentorStudioFolder)" 
+
+              --max_techdebt_level "$(TECHDEBTLEVEL)" 
+
+              --max_security_findings "$(SECURITYFINDINGSCOUNT)" 
+
+          displayName: 'Check technical debt data thresholds' 
+
+ 
+
+# ****************************************************************** 
+
+# Stage 3: Unit Testing 
+
+# ****************************************************************** 
+
+- stage: unit_testing 
+
+  displayName: Unit Testing   
+
+  jobs: 
+
+    - job: unit_testing_bdd 
+
+      displayName: Unit Testing (BDD) 
+
+     # dependsOn: lifetime_deployment 
+
+      steps: 
+
+        - download: current 
+
+        - script: | 
+
+            pip install -U outsystems-pipeline==$(OSPackageVersion) 
+
+          displayName: 'Install outsystems-pipeline package' 
+
+ 
+
+        - script: | 
+
+              AppList=$(cat "$(Pipeline.Workspace)/$(ArtifactsBuildFolder)/$(ArtifactName)" | jq -c '.ApplicationVersions | map(.ApplicationName) | join(",")') 
+
+              echo "##vso[task.setvariable variable=AppList;isOutput=true]$AppList" 
+
+          displayName: 'Get App List from Manifest' 
+
+          name: get_app_list  
+
+ 
+
+        - script: > 
+
+            python -m outsystems.pipeline.generate_unit_testing_assembly 
+
+            --artifacts "$(ArtifactsBuildFolder)"  
+
+            --app_list $(get_app_list.AppList) 
+
+            --cicd_probe_env $(ProbeEnvironmentURL) 
+
+            --bdd_framework_env $(ProbeEnvironmentURL) 
+
+          displayName: 'Generate URL endpoints for BDD test suites' 
+
+ 
+
+        - script: > 
+
+            python -m outsystems.pipeline.evaluate_test_results  
+
+            --artifacts "$(ArtifactsBuildFolder)" 
+
+          continueOnError: true  
+
+          displayName: 'Run BDD test suites and generate JUnit test report' 
+
+ 
+
+        - task: PublishTestResults@2 
+
+          inputs: 
+
+            testResultsFormat: 'JUnit' 
+
+            testResultsFiles: 'junit-result.xml' 
+
+            searchFolder: '$(ArtifactsBuildFolder)' 
+
+            mergeTestResults: true 
+
+            failTaskOnFailedTests: true 
+
+            testRunTitle: 'BDD Tests' 
+
+          displayName: 'Publish Test results' 
+
+ 
+
+# ****************************************************************** 
+
+# Stage 4: Artifact Repository 
+
+# ****************************************************************** 
+
+- stage: artifact_repositary 
+
+  displayName: Artifact Repository     
+
+  jobs: 
+
+    - job: artifact_repositary 
+
+      displayName: Artifact Repository 
+
+      steps: 
+
+          - script: echo "Artifact Repository stage" 
+
+ 
+
+# ****************************************************************** 
+
+# Stage 5: SAST Scan 
+
+# ****************************************************************** 
+
+- stage: sast_scan 
+
+  displayName: SAST Scan     
+
+  jobs: 
+
+    - job: sast_scan 
+
+      displayName: SAST Scan 
+
+      steps: 
+
+          - script: echo "SAST Scan stage" 
+
+ 
+
+# ****************************************************************** 
+
+# Stage 6: Test Automation 
+
+# ****************************************************************** 
+
+- stage: test_automation 
+
+  displayName: Test Automation    
+
+  jobs: 
+
+    - job: test_automation 
+
+      displayName: Test Automation 
+
+      steps: 
+
+          - script: echo "Test Automation stage" 
+
+ 
+
+# ****************************************************************** 
+
+# Stage 7: DAST Scan 
+
+# ****************************************************************** 
+
+- stage: dast_scan 
+
+  displayName: DAST Scan  
+
+  jobs: 
+
+    - job: dast_scan 
+
+      displayName: DAST Scan 
+
+      steps: 
+
+          - script: echo "DAST Scan stage" 
+
+ 
+
+# ****************************************************************** 
+
+# Stage 8: Accept Changes 
+
+# ****************************************************************** 
+
+- stage: accept_changes 
+
+  displayName: Accept Changes 
+
+  jobs: 
+
+    - job: accept_changes 
+
+      displayName: Accept Changes 
+
+     # dependsOn: lifetime_deployment 
+
+      pool: server 
+
+      steps: 
+
+        - task: ManualValidation@0 
+
+          timeoutInMinutes: 60 
+
+          inputs: 
+
+            notifyUsers: 'true' 
+
+            instructions: 'Accept changes and proceed to Production?' 
+
+          displayName: 'Go/No-Go Decision' 
+
+ 
+
+# ****************************************************************** 
+
+# Stage 9: Production Deployment/Go-Live 
+
+# ****************************************************************** 
+
+- stage: production_deployment 
+
+  displayName: Production Deployment 
+
+  jobs: 
+
+ 
+
+  # ****************************************************************** 
+
+  # Job: LifeTime Deployment 
+
+  # ****************************************************************** 
+
+  # Deploy list of application versions to PRD environment 
+
+  # ****************************************************************** 
+
+   
+
+  - deployment: lifetime_deployment 
+
+    displayName: LifeTime Deployment 
+
+    environment: $(ENVIRONMENT) 
+
+    strategy: 
+
+      runOnce: 
+
+         deploy: 
+
+          steps: 
+
+          - download: current 
+
+          - script: | 
+
+                pip install -U outsystems-pipeline==$(OSPackageVersion) 
+
+            displayName: 'Install outsystems-pipeline package' 
+
+ 
+
+          - script: > 
+
+                python -m outsystems.pipeline.deploy_tags_to_target_env_with_manifest 
+
+                --artifacts "$(ArtifactsBuildFolder)"  
+
+                --lt_url $(LifeTimeHostname)  
+
+                --lt_token $(LifeTimeServiceAccountToken)  
+
+                --lt_api_version $(LifeTimeAPIVersion)  
+
+                --source_env_label $(DevelopmentEnvironment) 
+
+                --destination_env_label $(ProductionEnvironment) 
+
+                --manifest_file "$(Pipeline.Workspace)/$(ArtifactsBuildFolder)/$(ArtifactName)" 
+
+            displayName: 'Deploy to $(ProductionEnvironment) environment' 
+
+               
+
+          - task: PowerShell@2 
+
+            inputs: 
+
+                  targetType: 'inline' 
+
+                  script:  Get-Content -Path "$(ArtifactsBuildFolder)\DeploymentConflicts" | Write-Host 
+
+            condition: failed() 
+
+            displayName: 'Show content of DeploymentConflicts file' 
+
+ 
